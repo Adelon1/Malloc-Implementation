@@ -56,7 +56,7 @@
 /* Global variables */
 static char* heap_listp;      /* points to prologue's payload */
 static char* free_listp;      /* points to first free block */
-const size_t CHUNKSIZE;
+const size_t CHUNKSIZE = (1 << 8); /* Extend heap by this amount (bytes) */
 
 
 /* Forward declarations */
@@ -177,8 +177,7 @@ int mm_init(void)
 
     /* Extend the heap */
     free_listp = NULL;
-    size_t pagesize = ALIGN(mem_pagesize());
-    if (!extend_heap(pagesize / WSIZE)) return -1;
+    if (!extend_heap(CHUNKSIZE / WSIZE)) return -1;
 
     return 0;
 }
@@ -231,26 +230,79 @@ void* mm_malloc(size_t size)
  */
 void mm_free(void *ptr)
 {
+    if (!ptr) return;
+    size_t size = GET_SIZE(HDRP(ptr));
+
+    PUT(HDRP(ptr), PACK(size, 0));
+    PUT(FTRP(ptr), PACK(size, 0));
+    insert_free_block(ptr);
+    (void)coalesce(ptr);
 }
 
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  */
-void *mm_realloc(void *ptr, size_t size)
+void* mm_realloc(void *ptr, size_t size)
 {
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
-    
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
-      return NULL;
-    copySize = *(size_t *)((char *)oldptr - WSIZE);
-    if (size < copySize)
-      copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
-    return newptr;
+    if (!ptr) return mm_malloc(size);
+    if (size == 0) { mm_free(ptr); return NULL; }
+
+    size_t asize = (size <= WSIZE) ? MIN_BLOCK_SIZE : ALIGN(size) + DSIZE;
+    size_t bsize = GET_SIZE(HDRP(ptr));
+
+    if (bsize >= asize) {
+        size_t diff = bsize - asize;
+        if (diff < MIN_BLOCK_SIZE) return ptr;
+
+        PUT(HDRP(ptr), PACK(asize, 1));
+        PUT(FTRP(ptr), PACK(asize, 1));
+
+        char* next_ptr = NEXT_BLKP(ptr);
+        PUT(HDRP(next_ptr), PACK(diff, 0));
+        PUT(FTRP(next_ptr), PACK(diff, 0));
+        insert_free_block(next_ptr);
+        coalesce(next_ptr);
+        return ptr;
+
+    }
+
+    char* next_blk = NEXT_BLKP(ptr);
+    if (!GET_ALLOC(HDRP(next_blk))) {
+        size_t combined = bsize + GET_SIZE(HDRP(next_blk));
+        if (combined >= asize) {
+            size_t diff = combined - asize; 
+
+            if(diff < MIN_BLOCK_SIZE) {
+                remove_free_block(next_blk);
+                PUT(HDRP(ptr), PACK(combined, 1));
+                PUT(FTRP(ptr), PACK(combined, 1));
+            }
+            else {
+                char* prev_free = *PREV_PTR(next_blk);
+                char* next_free = *NEXT_PTR(next_blk);
+
+                PUT(HDRP(ptr), PACK(asize, 1));
+                PUT(FTRP(ptr), PACK(asize, 1));
+
+                char* next_ptr = NEXT_BLKP(ptr);
+                PUT(HDRP(next_ptr), PACK(diff, 0));
+                PUT(FTRP(next_ptr), PACK(diff, 0));
+
+                *PREV_PTR(next_ptr) = prev_free;
+                *NEXT_PTR(next_ptr) = next_free;
+                if (prev_free) *NEXT_PTR(prev_free) = next_ptr;
+                else free_listp = next_ptr;
+                if (next_free) *PREV_PTR(next_free) = next_ptr;
+            }
+            return ptr;
+        }
+    }
+
+    void* new_ptr = mm_malloc(size);
+    if (!new_ptr) return NULL;
+    memcpy(new_ptr, ptr, bsize - DSIZE);
+    mm_free(ptr);
+    return new_ptr;
 }
 
 
